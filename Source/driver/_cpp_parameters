@@ -390,6 +390,9 @@ T_guess                     Real           1.e8               y
 # maximum level to do an explicit burn on (above this, we interpolate the reactions source)
 reactions_max_solve_level    int           100
 
+# should we do the burn fourth-order accurate in space?
+fourth_order_burn            int           0
+
 #-----------------------------------------------------------------------------
 # category: diffusion
 #-----------------------------------------------------------------------------

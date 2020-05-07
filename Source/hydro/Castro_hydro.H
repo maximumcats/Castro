@@ -541,7 +541,6 @@
 
 #endif
 
-#ifdef TRUE_SDC
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     Real compute_laplacian(int i, int j, int k, int n,
                            Array4<Real const> const a,
@@ -584,5 +583,3 @@
                                 Array4<Real> const& q, const int ncomp,
                                 Array4<Real> const& tmp,
                                 GpuArray<int, 3> const& domlo, GpuArray<int, 3> const& domhi);
-
-#endif

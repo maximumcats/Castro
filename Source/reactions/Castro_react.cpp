@@ -1,6 +1,7 @@
 
 #include "Castro.H"
 #include "Castro_F.H"
+#include "Castro_hydro.H"
 
 using std::string;
 using namespace amrex;
@@ -53,7 +54,20 @@ Castro::react_state(MultiFab& s, MultiFab& r, Real time, Real dt)
         FillCoarsePatch(r, 0, time, Reactions_Type, 0, r.nComp(), r.nGrow());
     }
 
-    const int ng = s.nGrow();
+    // For the fourth order burn, we need two ghost zones.
+
+    MultiFab s_temp;
+
+    if (fourth_order_burn) {
+        s_temp.define(grids, dmap, s.nComp(), 2);
+        expand_state(s_temp, time, 2);
+    }
+
+    // We require at least one reactions ghost zone for the fourth order burn.
+
+    if (fourth_order_burn) {
+        AMREX_ALWAYS_ASSERT(r.nGrow() >= 1);
+    }
 
     if (verbose)
         amrex::Print() << "... Entering burner and doing half-timestep of burning." << std::endl << std::endl;
@@ -68,10 +82,31 @@ Castro::react_state(MultiFab& s, MultiFab& r, Real time, Real dt)
     for (MFIter mfi(s, TilingIfNotGPU()); mfi.isValid(); ++mfi)
     {
 
-        const Box& bx = mfi.growntilebox(ng);
+        const Box& bx = mfi.tilebox();
+        const Box& obx = amrex::grow(bx, 1);
 
-        auto U = s.array(mfi);
-        auto reactions = r.array(mfi);
+        // In order to convert the cell center burn data back to
+        // cell averages, we need to burn on one ghost zone for
+        // the fourth order burn.
+
+        const Box& burn_bx = fourth_order_burn ? obx : bx;
+
+        // For the fourth-order burn, convert the cell averages to cell centers.
+
+        FArrayBox U_fab;
+        FArrayBox R_fab;
+
+        if (fourth_order_burn) {
+            U_fab.resize(obx, s.nComp());
+            R_fab.resize(obx, r.nComp());
+            make_cell_center(obx, s_temp.array(mfi), U_fab.array(), geom.Domain().loVect3d(), geom.Domain().hiVect3d());
+        }
+
+        Elixir elix_U_fab = U_fab.elixir();
+        Elixir elix_R_fab = R_fab.elixir();
+
+        auto U = fourth_order_burn ? U_fab.array() : s.array(mfi);
+        auto R = fourth_order_burn ? R_fab.array() : r.array(mfi);
 
         if (level <= castro::reactions_max_solve_level) {
 
@@ -82,7 +117,7 @@ Castro::react_state(MultiFab& s, MultiFab& r, Real time, Real dt)
             Real lreact_rho_min = castro::react_rho_min;
             Real lreact_rho_max = castro::react_rho_max;
 
-            reduce_op.eval(bx, reduce_data,
+            reduce_op.eval(burn_bx, reduce_data,
             [=] AMREX_GPU_HOST_DEVICE (int i, int j, int k) noexcept -> ReduceTuple
             {
 
@@ -146,28 +181,28 @@ Castro::react_state(MultiFab& s, MultiFab& r, Real time, Real dt)
                     // careful because the reactions and state MFs may
                     // not have the same number of ghost cells.
 
-                    if (reactions.contains(i,j,k)) {
+                    if (R.contains(i,j,k)) {
                         for (int n = 0; n < NumSpec; ++n) {
-                            reactions(i,j,k,n) = U(i,j,k,URHO) * (burn_state.xn[n] - U(i,j,k,UFS+n) * rhoInv) / dt;
+                            R(i,j,k,n) = U(i,j,k,URHO) * (burn_state.xn[n] - U(i,j,k,UFS+n) * rhoInv) / dt;
                         }
 #if naux > 0
                         for (int n = 0; n < NumAux; ++n) {
-                            reactions(i,j,k,n+NumSpec) = U(i,j,k,URHO) * (burn_state.aux[n] - U(i,j,k,UFX+n) * rhoInv) / dt;
+                            R(i,j,k,n+NumSpec) = U(i,j,k,URHO) * (burn_state.aux[n] - U(i,j,k,UFX+n) * rhoInv) / dt;
                         }
 #endif
-                        reactions(i,j,k,NumSpec+NumAux  ) = U(i,j,k,URHO) * burn_state.e / dt;
-                        reactions(i,j,k,NumSpec+NumAux+1) = amrex::max(1.0_rt, static_cast<Real>(burn_state.n_rhs + 2 * burn_state.n_jac));
+                        R(i,j,k,NumSpec+NumAux  ) = U(i,j,k,URHO) * burn_state.e / dt;
+                        R(i,j,k,NumSpec+NumAux+1) = amrex::max(1.0_rt, static_cast<Real>(burn_state.n_rhs + 2 * burn_state.n_jac));
                     }
 
                 }
                 else {
 
-                    if (reactions.contains(i,j,k)) {
+                    if (R.contains(i,j,k)) {
                         for (int n = 0; n < NumSpec + NumAux + 1; ++n) {
-                            reactions(i,j,k,n) = 0.0_rt;
+                            R(i,j,k,n) = 0.0_rt;
                         }
 
-                        reactions(i,j,k,NumSpec+NumAux+1) = 1.0_rt;
+                        R(i,j,k,NumSpec+NumAux+1) = 1.0_rt;
                     }
 
                 }
@@ -189,22 +224,33 @@ Castro::react_state(MultiFab& s, MultiFab& r, Real time, Real dt)
 
         }
 
+        // For the fourth order burn, the reactions data we have now is
+        // defined at cell centers. Convert back to cell averages.
+
+        if (fourth_order_burn) {
+            r[mfi].copy<RunOn::Device>(R_fab, obx, 0, obx, 0, R_fab.nComp());
+            make_fourth_average(bx, r.array(mfi), R, geom.Domain().loVect3d(), geom.Domain().hiVect3d());
+        }
+
         // Now update the state with the reactions data.
+
+        auto s_arr = s.array(mfi);
+        auto r_arr = r.array(mfi);
 
         amrex::ParallelFor(bx,
         [=] AMREX_GPU_HOST_DEVICE (int i, int j, int k) noexcept
         {
-            if (U.contains(i,j,k) && reactions.contains(i,j,k)) {
+            if (s_arr.contains(i,j,k) && r_arr.contains(i,j,k)) {
                 for (int n = 0; n < NumSpec; ++n) {
-                    U(i,j,k,UFS+n) += reactions(i,j,k,n) * dt;
+                    s_arr(i,j,k,UFS+n) += r_arr(i,j,k,n) * dt;
                 }
 #if naux > 0
                 for (int n = 0; n < NumAux; ++n) {
-                    U(i,j,k,UFX+n) += reactions(i,j,k,n+NumSpec) * dt;
+                    s_arr(i,j,k,UFX+n) += r_arr(i,j,k,n+NumSpec) * dt;
                 }
 #endif
-                U(i,j,k,UEINT) += reactions(i,j,k,NumSpec+NumAux) * dt;
-                U(i,j,k,UEDEN) += reactions(i,j,k,NumSpec+NumAux) * dt;
+                s_arr(i,j,k,UEINT) += r_arr(i,j,k,NumSpec+NumAux) * dt;
+                s_arr(i,j,k,UEDEN) += r_arr(i,j,k,NumSpec+NumAux) * dt;
             }
         });
 
