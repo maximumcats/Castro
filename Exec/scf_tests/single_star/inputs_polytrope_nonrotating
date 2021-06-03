@@ -7,7 +7,7 @@ geometry.coord_sys   =  0
 geometry.is_periodic =  0 0 0
 geometry.prob_lo     = -3.0e9 -3.0e9 -3.0e9
 geometry.prob_hi     =  3.0e9  3.0e9  3.0e9
-amr.n_cell           =  128    128    128 
+amr.n_cell           =  128    128    128
 
 amr.max_level        = 0
 amr.ref_ratio        = 2 2 2 2 2 2 2 2 2 2 2
@@ -32,8 +32,8 @@ castro.rotational_period = 100.0
 
 castro.do_scf_initial_model = 1
 castro.scf_maximum_density = 1.0e7
-castro.scf_equatorial_radius = 1.5445e9
-castro.scf_polar_radius = 1.5445e9
+castro.scf_equatorial_radius = 7.5848e8
+castro.scf_polar_radius = 7.5848e8
 castro.scf_relax_tol = 1.e-4
 
 # GRAVITY
@@ -67,4 +67,4 @@ amr.refine.denerr.field_name = density
 
 # EOS
 
-eos.polytrope_type = 2   # Relativistic, fully electron-degenerate
+eos.polytrope_type = 1   # Non-relativistic, fully electron-degenerate
